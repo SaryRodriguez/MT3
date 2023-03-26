@@ -1,0 +1,408 @@
+---
+title: "Exercise1"
+author: "Sara Rodriguez"
+date: "2023-03-26"
+output:
+  prettydoc::html_pretty:
+    theme: cerulean
+    highlight: github
+  pdf_document: default
+---
+
+
+# <font color= #2E9AFE> Exercise 1: Store Sales - Time Series Forecasting </font>
+
+
+### Overview
+
+The goal is to predict sales for the thousands of product families sold at "Favorita" stores located in Ecuador. 
+
+### The data
+
+Data can be found in:
+https://www.kaggle.com/competitions/store-sales-time-series-forecasting/data
+
+The challenge contains 7 different files:
+
+**train.csv**
+
+This is the training data, comprising time series of features store_nbr, family, and onpromotion as well as the target sales.
+
+- *store_nbr* identifies the store at which the products are sold.
+- *family* identifies the type of product sold.
+- *sales* gives the total sales for a product family at a particular store at a given date. Fractional values are possible since products can be sold in fractional units (1.5 kg of cheese, for instance, as opposed to 1 bag of chips).
+- *onpromotion* gives the total number of items in a product family that were being promoted at a store at a given date.
+
+**test.csv**
+
+- The test data, having the same features as the training data. You will predict the target sales for the dates in this file.
+- The dates in the test data are for the 15 days after the last date in the training data.
+
+
+**sample_submission.csv**
+
+- A sample submission file in the correct format.
+
+**stores.csv**
+
+- Store metadata, including city, state, type, and cluster.
+- cluster is a grouping of similar stores.
+
+**oil.csv**
+- Daily oil price. Includes values during both the train and test data timeframes. (Ecuador is an oil-dependent country and it's economical health is highly vulnerable to shocks in oil prices.)
+
+**holidays_events.csv**
+
+- Holidays and Events, with metadata
+- NOTE: Pay special attention to the transferred column. A holiday that is transferred officially falls on that calendar day, but was moved to andata date by the government. A transferred day is more like a normal day than a holiday. To find the day that it was actually celebrated, look for the corresponding row where type is Transfer. For example, the holiday Independencia de Guayaquil was transferred from 2012-10-09 to 2012-10-12, which means it was celebrated on 2012-10-12. Days that are type Bridge are extra days that are added to a holiday (e.g., to extend the break across a long weekend). These are frequently made up by the type Work Day which is a day not normally scheduled for work (e.g., Saturday) that is meant to payback the Bridge.
+- Additional holidays are days added a regular calendar holiday, for example, as typically happens around Christmas (making Christmas Eve a holiday).
+
+**transactions.csv**
+- Contains the total transactions for each store on a daily basis
+
+**Additional Notes**
+- Wages in the public sector are paid every two weeks on the 15 th and on the last day of the month. Supermarket sales could be affected by this.
+- A magnitude 7.8 earthquake struck Ecuador on April 16, 2016. People rallied in relief efforts donating water and data first need products which greatly affected supermarket sales for several weeks after the earthquake.
+
+
+
+<img style="float: center; margin: 0px 0px 15px 15px;" src="https://www.kaggle.com/static/images/site-logo.svg" width="250px" height="80px" />
+
+
+#### First Ideas
+
+Data is labeled and target variable is numerical, therefore is a Regression Supervised Learning problem
+
+#### Load libraries
+
+
+
+```{r, warning=FALSE, message=FALSE}
+library(shiny)
+library(Rcpp)
+#install.packages("forecast", dependencies=TRUE)
+#library(fpp)
+library(tsbox)
+library(readr)
+library(shinythemes)
+library(forecast)
+library(ggplot2)
+library(plotly)
+library(lubridate)
+library(modeltime)
+library(tidymodels)
+library(timetk)
+library(tidyverse)
+library(fpp3)
+library(earth)
+library(forecast)
+```
+
+
+## <font color= 'green'> Exploratory Data Analysis </font>
+
+```{r, warning=FALSE, message=FALSE}
+#Load data
+setwd("C:/Users/rodrigsa/OneDrive - HP Inc/MT3")
+train <- readr::read_csv('train.csv')
+test <- readr::read_csv('test.csv')
+stores <- readr::read_csv('stores.csv')
+oil <- readr::read_csv('oil.csv')
+holiday <- readr::read_csv('holidays_events.csv')
+
+#time series object with "date" as index and "store/family" determine key indices
+df <- train %>%
+  as_tsibble(key = c(store_nbr, family), index = date) %>%
+  fill_gaps(.full = TRUE)
+# replace NAs with 0
+df[is.na(df)] <- 0
+
+```
+
+
+
+### Holidays Data
+
+```{r, warning=FALSE, message=FALSE}
+head(holiday)
+```
+
+```{r, warning=FALSE, message=FALSE}
+#missing values
+colSums(is.na(holiday)) 
+```
+
+There are no missing values in the data
+
+```{r, warning=FALSE, message=FALSE}
+summary(holiday) 
+```
+- There are 5 years of data (2012-2017)
+
+```{r, warning=FALSE, message=FALSE}
+unique(holiday$locale)
+unique(holiday$transferred)
+unique(holiday$type)
+```
+
+Before adding the data we will be careful with:
+- Transferred column (using only days that were not transferred)
+- Filtering only by National holidays because our model will be at national level
+- Removing the records where it was a working day (it was not an actual holiday)
+
+
+
+```{r, warning=FALSE, message=FALSE}
+#Cleaning the holiday data so we only end with only one date with its corresponding holiday type
+holiday <- holiday %>%
+  filter(locale == 'National', transferred == FALSE, type != 'Work Day',year(date) >= 2013) %>%
+  select(c(date, type))
+holiday <- holiday[!duplicated(holiday$date), ]
+head(holiday)
+```
+
+
+
+### Stores Data
+
+```{r, warning=FALSE, message=FALSE}
+head(stores)
+```
+
+```{r, warning=FALSE, message=FALSE}
+#there is no missing data
+colSums(is.na(stores)) 
+```
+
+```{r, warning=FALSE, message=FALSE}
+summary(stores) 
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+barplot(table(stores$cluster))
+```
+
+
+
+There is more data from stores in cluster #3
+
+
+### Oil Data
+
+```{r, warning=FALSE, message=FALSE}
+head(oil)
+```
+
+
+
+```{r, warning=FALSE, message=FALSE}
+#there is 43 missing data
+colSums(is.na(oil)) 
+```
+
+```{r, warning=FALSE, message=FALSE}
+summary(oil) 
+```
+- There are 4 years of data (2013-2017)
+
+
+
+### Train Data
+
+```{r, warning=FALSE, message=FALSE}
+colSums(is.na(df)) 
+```
+
+```{r, warning=FALSE, message=FALSE}
+summary(df)
+```
+
+
+We have sales data since 2013, so we need to be careful on filtering all data databases using this date. 
+
+```{r, warning=FALSE, message=FALSE}
+# grouping data (aggregating by the lowest levels: family and store)
+df <- df %>%
+  aggregate_key(family / store_nbr, sales = sum(sales), onpromotion =  sum(onpromotion))
+```
+
+
+
+```{r, warning=FALSE, message=FALSE}
+#correlation between target variable and promotion
+df %>%
+  filter(is_aggregated(store_nbr), is_aggregated(family))%>%
+  as_tibble()%>%
+  summarize(cor(sales, onpromotion))
+```
+
+
+Promotion is moderately correlated with sales (0.57)
+
+
+
+
+## <font color= 'green'> Visualizations </font>
+
+```{r, warning=FALSE, message=FALSE}
+#Time series and its trend
+df %>%
+  filter(is_aggregated(store_nbr), is_aggregated(family)) %>%
+  ggplot(aes(x = date, y = sales)) + 
+  geom_line() +
+  labs(title = "Sales over time") +
+  geom_smooth(method=lm)
+```
+
+
+
+
+We can observe in the graph that the time series could be described with a multiplicative model since the series variance changes a lot over time.
+
+The trend seems to increase over time.
+
+We can also see that there seem to be seasonal variation, there is a decrease in sales at the beginning of each year. Lets find out about this seasonality. 
+
+
+```{r, warning=FALSE, message=FALSE}
+#monthly seasonality 
+df %>%
+  filter(is_aggregated(store_nbr), is_aggregated(family)) %>%
+  gg_season(sales, labels='both', period='year') +
+  labs(title = "Monthly Seasonality in Sales")
+```
+
+
+Doesnt seem to have a strong monthly seasonality. The patterns are not clear, it looks more like a weekly seasonality
+
+
+```{r, warning=FALSE, message=FALSE}
+#weekly seasonality
+df %>%
+  filter(is_aggregated(store_nbr), is_aggregated(family)) %>%
+  gg_season(sales, period = 'week') +
+  labs(title = "Weekly Seasonality in Sales")
+```
+
+
+There are higher sales at the end of the week (Saturday and Sunday)
+
+
+## What if we add holidays data?
+
+
+
+```{r, warning=FALSE, message=FALSE}
+#merge our data with holidays by date
+df <- df %>%
+  left_join(holiday, by = 'date') %>%
+  mutate(
+    day_type = case_when(
+        month(date) == 12 & day(date) == 25 ~ 'Closed',
+        is.na(type) == FALSE ~ 'Holiday',
+        wday(date) %in% 2:6 ~ "Weekday",
+        TRUE ~ "Weekend")   
+         ) %>%
+  select(-type)
+
+
+head(df)
+```
+
+
+## What if we add oil data?
+
+Merge databases by date
+
+```{r, warning=FALSE, message=FALSE}
+df <- df %>%
+  left_join(oil, by = 'date') %>%
+  group_by_key() %>% 
+  tidyr::fill(dcoilwtico, .direction = "up")
+
+head(df)
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+#correlation between target variable and oil
+df %>%
+    filter(is_aggregated(store_nbr), is_aggregated(family))%>%
+  as_tibble()%>%
+    summarize(cor(sales, dcoilwtico))
+```
+
+
+Oil price is negatively moderately correlated with sales
+
+
+## <font color= 'green'> Modeling </font>
+
+```{r, warning=FALSE, message=FALSE}
+
+trial <- df %>%
+  filter(is_aggregated(store_nbr), is_aggregated(family)) %>%
+  model(
+      deterministic = ARIMA(sqrt(sales) ~ 1 + trend() + pdq(d = 0)),
+      stochastic = ARIMA(sqrt(sales) ~ pdq(d = 1)),
+      multiplicative = ETS(sqrt(sales)~ error("M") + trend("A") + season("M")),
+      ets = ETS(sqrt(sales)), # ETS
+      
+      stlf = decomposition_model(
+          STL(sqrt(sales), robust = TRUE), 
+          ETS(season_adjust ~ error('A') + trend('A') + season("N"))
+                                ), # STL + ETS 
+      
+      rgrs = ARIMA(sqrt(sales) ~ trend() +season() + onpromotion + dcoilwtico + day_type) 
+        )
+
+```
+
+
+
+```{r, warning=FALSE, message=FALSE}
+
+accuracy(trial)
+
+```
+
+From the metrics above the best model with the lowest error is the regression model . 
+RMSE is more accurate so we will use that value. 
+
+```{r, warning=FALSE, message=FALSE}
+model_fit <- df %>%
+  model(
+    rgrs = ARIMA(sqrt(sales) ~ trend() +season() + onpromotion + dcoilwtico + day_type) 
+    ) %>%
+  reconcile(top = top_down(rgrs)) #to product top-bottom forecasts
+
+aug <- augment(model_fit)
+
+```
+
+
+## <font color= 'green'> Predictions </font>
+
+```{r, warning=FALSE, message=FALSE}
+# forecast
+predictions <- model_fit %>%
+  forecast(h = 16)
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+final <- predictions %>%
+  filter(!is_aggregated(store_nbr), !is_aggregated(family), .model == 'top') %>%
+  as_tibble() %>%
+  mutate(family = as.character(family), store_nbr = as.double(as.character(store_nbr))) %>%
+  left_join(test, by = c('date','store_nbr', 'family')) %>%
+  select(c(id, .mean)) %>%
+  rename(sales = .mean) %>%
+  arrange(id)
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+write.csv(final, "final_predictions_houses.csv", row.names = F)
+```
